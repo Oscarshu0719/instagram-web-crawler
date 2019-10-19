@@ -1,5 +1,4 @@
 */__pycache__/*
 */secret.py
 *.log
-*.txt
 bin/chromedriver.exe
