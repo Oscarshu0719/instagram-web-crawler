@@ -22,10 +22,11 @@ from bs4 import BeautifulSoup as bs
 
 """
     Usage:
-        python instagran_web_crawler.py path
+        python instagran_web_crawler.py [path] [--saved] 
     
     Args:
         path: Input path (a file including one user_id per line).
+        --saved: Download from saved.
 
     Notice:
         Put chromedriver.exe in folder /bin.
@@ -44,12 +45,16 @@ from bs4 import BeautifulSoup as bs
                 b987654321 2018-01-01 2019-01-01
                 c111111111 - 2019-02-01
                 d222222222 2019-03-01
+                e333333333 
 """
 
 # TODO: Download videos.
 # TODO: Download media which are in the specified period.
 
 URL = 'https://www.instagram.com'
+URL_SAVED = 'https://www.instagram.com/{}/saved/'
+
+COOKIE = 'mid={}; fbm_124024574287414=base_domain=.instagram.com; shbid={}; shbts={}; ds_user_id={}; csrftoken={}; sessionid={}; rur={}; urlgen={}'
 
 START_DATE = '1900-01-01'
 END_DATE = datetime.now().strftime("%Y-%m-%d")
@@ -65,13 +70,18 @@ HAS_SCREEN:
 HAS_SCREEN = False
 browser = Browser(HAS_SCREEN)
 
+logged_in_user = ''
+download_saved = False
+download_from_file = False
+
 PATTERN_DATE = r'\d\d\d\d-\d\d-\d\d'
 
 
-def output_log(msg):
+def output_log(msg, traceback=True):
     with open(LOG_PATH, 'a', encoding='utf8') as output_log:
         output_log.write(msg)
-    traceback.print_exc(file=open(LOG_PATH, 'a', encoding='utf8'))
+    if traceback:
+        traceback.print_exc(file=open(LOG_PATH, 'a', encoding='utf8'))
     
 def retry(attempt=10, wait=0.3):
     def wrap(func):
@@ -120,6 +130,13 @@ def login():
             raise RetryException()
 
     check_login()
+
+    global logged_in_user
+    logged_in_user_url = browser.find(
+        "div[class='XrOey'] a")[2].get_attribute("href")
+    logged_in_user = logged_in_user_url[
+        logged_in_user_url[: -1].rfind('/') + 1: -1]
+    print('\n* Logged in as user (username: {}).\n'.format(logged_in_user))
 
 def print_user_profile(user_profile):
     print("\n* User profile: ")
@@ -201,7 +218,6 @@ def fetch_imgs(dict_post):
     # ele_videos = browser.find(".QvAa1 ", waittime=10)
     # if ele_videos:
     #     ele_videos.click()
-    
 
 def download_files(url_list, username, filename):
     if not os.path.exists(SAVE_PATH): 
@@ -304,35 +320,84 @@ def get_posts(username, post_num):
         if left_arrow:
             left_arrow.click()
 
-def web_crawler(username_list):
+def get_saved_posts():
+    url_saved = URL_SAVED.format(logged_in_user)
+
+    browser.get(url_saved)
+
+    url = 'https://www.instagram.com/oscar980719/?__a=1'
+
+    cookies_list = browser.driver.get_cookies()
+    cookies_dict = {}
+    for cookie in cookies_list:
+        cookies_dict[cookie['name']] = cookie['value']
+
+    param = {
+        '__a': '1'
+    }
+
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/77.0.3865.120 Safari/537.36'
+    }
+
+    headers['cookie'] = COOKIE.format(cookies_dict["mid"], cookies_dict["shbid"], 
+        cookies_dict["shbts"], cookies_dict["ds_user_id"], cookies_dict["csrftoken"], 
+        cookies_dict["sessionid"], cookies_dict["rur"], cookies_dict["urlgen"])
+    
+    response = requests.get(url=url,params=param,headers=headers)
+    data = response.text
+    data = json.loads(data)
+
+    post_num = data["graphql"]["user"]["edge_saved_media"]["count"]
+    get_posts(logged_in_user, post_num)
+
+def web_crawler():
     global START_DATE
     global END_DATE
     
-    if USERNAME != '' and PASSWORD != '':
-        login()
+    if USERNAME == '' or PASSWORD == '':
+        msg = '{} - Error: Please enter your username and password in secret.py (option --saved).\n'.format(
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        output_log('\n' + msg, traceback=False)
+        raise Exception(msg)
 
-    for x in username_list:
-        if len(x) != 1:
-            if re.match(PATTERN_DATE, x[1]):
-                START_DATE = x[1]
-            if len(x) == 3 and re.match(PATTERN_DATE, x[2]):
-                END_DATE = x[2]
-        username = x[0]
+    login()
 
-        user_profile = get_user_profile(username)
+    if download_saved:
+        get_saved_posts()
 
-        print_user_profile(user_profile)
+    if download_from_file:
+        with open(sys.argv[1], 'r', encoding='utf8') as input_file:
+            username_list = [line.split() for line in input_file if len(line.split()) != 0]
 
-        dismiss_login_prompt()
+        for x in username_list:
+            if len(x) != 1:
+                if re.match(PATTERN_DATE, x[1]):
+                    START_DATE = x[1]
+                if len(x) == 3 and re.match(PATTERN_DATE, x[2]):
+                    END_DATE = x[2]
+            username = x[0]
 
-        post_num = int(user_profile["post_num"].replace(",", ""))
-        print('* Total number of posts: {} (username: {}).\n'.format(post_num, username))
-        get_posts(username, post_num)
+            user_profile = get_user_profile(username)
+
+            print_user_profile(user_profile)
+
+            dismiss_login_prompt()
+
+            post_num = int(user_profile["post_num"].replace(",", ""))
+            print('* Total number of posts: {} (username: {}).\n'.format(post_num, username))
+            get_posts(username, post_num)
 
 if __name__ == '__main__':
-    assert len(sys.argv) == 2, 'Error: The number of arguments is incorrect.'
+    assert len(sys.argv) == 2 or len(sys.argv) == 3, 'Error: The number of arguments is incorrect.'
+    if len(sys.argv) == 2:
+        if sys.argv[1] == "--saved":
+            download_saved = True
+    if len(sys.argv) == 3:
+        if sys.argv[2] == "--saved":
+            download_saved = True
+            download_from_file = True
+        else:
+            print('Error: Unknown argument at position 3.\n')
 
-    with open(sys.argv[1], 'r', encoding='utf8') as input_file:
-        username_list = [line.split() for line in input_file if len(line.split()) != 0]
-
-    web_crawler(username_list)
+    web_crawler()

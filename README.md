@@ -16,10 +16,11 @@ Instagram web crawler. Download images and videos from specific users.
 -   Copy `secret.py.dist` as `secret.py` in the same folder.
 
 ```
-python instagran_web_crawler.py *path*
+python instagran_web_crawler.py [*path*] [--saved] 
 
 Args:
         *path*: Input path (a file including one user_id per line).
+        --saved: Download from saved.
 ```
 
 ### Input file format
@@ -40,6 +41,7 @@ a123456789 2019-01-01 2019-06-01
 b987654321 2018-01-01 2019-01-01
 c111111111 - 2019-02-01
 d222222222 2019-03-01
+e333333333
 ```
 
 ## Requirements
