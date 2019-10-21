@@ -5,54 +5,28 @@ from src.exceptions import RetryException
 from src.secret import USERNAME, PASSWORD
 
 from datetime import datetime
-from functools import wraps
+from functools import wraps, partial
+from hashlib import md5
 import json
-import os 
+import os
+from pyquery import PyQuery as pq
 import re
 import requests
-from requests.adapters import HTTPAdapter
 import sys
 from time import sleep
 from tqdm import tqdm
 import traceback
 
-from urllib.request import urlopen
-from bs4 import BeautifulSoup as bs
-
-
-"""
-    Usage:
-        python instagran_web_crawler.py [path] [--saved] 
-    
-    Args:
-        path: Input path (a file including one user_id per line).
-        --saved: Download from saved.
-
-    Notice:
-        Put chromedriver.exe in folder /bin.
-        Copy secret.py.dist as secret.py in the same folder.
-
-        Input file format:
-            username [start_date] [end_date]
-
-            (If end_date is specific and no specific start_date, use '-'. 
-            If start_date is specific and no specific end_date, 
-            no other input is needed.)
-            (Default: Posts of all time.)
-
-            e.g.
-                a123456789 2019-01-01 2019-06-01
-                b987654321 2018-01-01 2019-01-01
-                c111111111 - 2019-02-01
-                d222222222 2019-03-01
-                e333333333 
-"""
-
-# TODO: Download videos.
-# TODO: Download media which are in the specified period.
 
 URL = 'https://www.instagram.com'
+URL_SHORTCODE = 'https://www.instagram.com/p/{}/'
 URL_SAVED = 'https://www.instagram.com/{}/saved/'
+URL_QUERY_POSTS = 'https://www.instagram.com/graphql/query/?query_hash={}&variables=%7B%22id%22%3A%22{}%22%2C%22first%22%3A12%2C%22after%22%3A%22{}%22%7D'
+URL_QUERY_SAVED_VIDEOS = 'https://www.instagram.com/graphql/query/?query_hash={}&variables=%7B%22shortcode%22%3A%22{}%22%2C%22child_comment_count%22%3A{}%2C%22fetch_comment_count%22%3A{}%2C%22parent_comment_count%22%3A{}%2C%22has_threaded_comments%22%3A{}%7D'
+
+HASH_NORMAL_POSTS = 'f045d723b6f7f8cc299d62b57abd500a'
+HASH_SAVED_POSTS = '8c86fed24fa03a8a2eea2a70a80c7b6b'
+HASH_SAVED_VIDEOS = '870ea3e846839a3b6a8cd9cd7e42290c'
 
 COOKIE = 'mid={}; fbm_124024574287414=base_domain=.instagram.com; shbid={}; shbts={}; ds_user_id={}; csrftoken={}; sessionid={}; rur={}; urlgen={}'
 
@@ -70,19 +44,20 @@ HAS_SCREEN:
 HAS_SCREEN = False
 browser = Browser(HAS_SCREEN)
 
-logged_in_user = ''
 download_saved = False
-download_from_file = False
+download_from_file = True
+logged_in_user = ''
 
 PATTERN_DATE = r'\d\d\d\d-\d\d-\d\d'
 
+# TODO: Download media which are in the specified period.
 
-def output_log(msg, traceback=True):
+def output_log(msg, traceback_option=True):
     with open(LOG_PATH, 'a', encoding='utf8') as output_log:
         output_log.write(msg)
-    if traceback:
+    if traceback_option:
         traceback.print_exc(file=open(LOG_PATH, 'a', encoding='utf8'))
-    
+
 def retry(attempt=10, wait=0.3):
     def wrap(func):
         @wraps(func)
@@ -107,14 +82,25 @@ def retry(attempt=10, wait=0.3):
 
     return wrap
 
-def dismiss_login_prompt():
-    # May be None.
-    ele_login = browser.find_one(".Ls00D .Szr5J")
-    if ele_login:
-        ele_login.click()
+def set_headers():
+    cookies_list = browser.driver.get_cookies()
+    cookies_dict = {}
+    for cookie in cookies_list:
+        cookies_dict[cookie['name']] = cookie['value']
+
+    headers = {
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/77.0.3865.120 Safari/537.36'
+    }
+
+    headers['cookie'] = COOKIE.format(cookies_dict["mid"], cookies_dict["shbid"], 
+        cookies_dict["shbts"], cookies_dict["ds_user_id"], cookies_dict["csrftoken"], 
+        cookies_dict["sessionid"], cookies_dict["rur"], cookies_dict["urlgen"])
+
+    return headers
 
 def login():
     url = "%s/accounts/login/" % (URL)
+    
     browser.get(url)
     u_input = browser.find_one('input[name="username"]')
     u_input.send_keys(USERNAME)
@@ -138,65 +124,100 @@ def login():
         logged_in_user_url[: -1].rfind('/') + 1: -1]
     print('\n* Logged in as user (username: {}).\n'.format(logged_in_user))
 
-def print_user_profile(user_profile):
-    print("\n* User profile: ")
-    print("name: {}".format(user_profile["name"]))
-    print("description: {}".format(user_profile["description"]))
-    print("photo_url: {}".format(user_profile["photo_url"]))
-    print("post_num: {}".format(user_profile["post_num"]))
-    print("follower_num: {}".format(user_profile["follower_num"]))
-    print("following_num: {}".format(user_profile["following_num"]))
-    print()
+    headers = set_headers()
 
-def get_user_profile(username):
+    return headers
+
+def get_html(url, headers):
     try:
-        url = "%s/%s/" % (URL, username)
-        browser.get(url)
-        name = browser.find_one(".rhpdm").text
-        description = browser.find_one(".-vDIg span")
-        # If the browser visits your page, the class of the photo will change.
-        photo = browser.find_one("._6q-tv")
-        # Others' page.
-        if photo:
-            photo = photo.get_attribute("src")
-        # Your page.
+        response = requests.get(url, headers=headers)
+        if response.status_code == requests.codes['ok']:
+            return response.text
         else:
-            photo = browser.find_one(".be6sR").get_attribute("src")
-
-        statistics = [ele.text for ele in browser.find(".g47SY")]
-        post_num, follower_num, following_num = statistics
-
-        return {
-            "name": name,
-            "description": description.text if description else None,
-            "photo_url": photo,
-            "post_num": post_num,
-            "follower_num": follower_num,
-            "following_num": following_num,
-        }
-    except AttributeError:
-        msg = '{} - Error: Failed to get the user profile (username: {}).\n'.format(
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S"), username)
+            msg = '{} - Error: Failed to get page source (status_code: {}).\n'.format(
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"), response.status_code)
+            output_log('\n' + msg)
+            raise Exception(msg)
+    except Exception:
+        msg = '{} - Error: Failed to get page source (status_code: {}).\n'.format(
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"), response.status_code)
         output_log('\n' + msg)
-        msg = ' ' + msg
-        raise AttributeError(msg)
+        raise Exception(msg)
 
-def fetch_datetime(dict_post):
-    ele_datetime = browser.find_one(".eo2As .c-Yi7 ._1o9PC")
-    if ele_datetime:
-        datetime = ele_datetime.get_attribute("datetime")
-        dict_post["datetime"] = datetime
+@retry()
+def get_json(url, headers):
+    try:
+        response = requests.get(url, headers=headers)
+        if response.status_code == requests.codes['ok']:
+            return response.json()
+        else:
+            msg = '{} - Warning: Failed to get json file (status_code: {}).\n'.format(
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"), response.status_code)
+            output_log('\n' + msg, False)
+            print('\n{} - Warning: Retry to get json file.\n'.format(
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+            return get_json(url, headers)
+    except Exception as e:
+        msg = '{} - Warning: Failed to get json file (status_code: {}).\n'.format(
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"), response.status_code)
+        output_log('\n' + msg, False)
+        print('\n{} - Warning: Retry to get json file.\n'.format(
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        return get_json(url, headers)
+ 
+def get_content(url, headers):
+    try:
+        response = requests.get(url, headers=headers)
+        if response.status_code == requests.codes['ok']:
+            return response.content
+        else:
+            msg = '{} - Error: Failed to get image content (status_code: {}).\n'.format(
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"), response.status_code)
+            output_log('\n' + msg, False)
+    except Exception as e:
+        msg = '{} - Error: Failed to get image content (status_code: {}).\n'.format(
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"), response.status_code)
+        output_log('\n' + msg, False)
 
-def fetch_imgs(dict_post):
-    img_urls = set()
+def get_video_url(shortcode, headers):
+    child_comment_count = '3'
+    fetch_comment_count = '40'
+    parent_comment_count = '24'
+    has_threaded_comments = 'true'
+
+    url = URL_QUERY_SAVED_VIDEOS.format(
+        HASH_SAVED_VIDEOS, shortcode, child_comment_count, fetch_comment_count, 
+        parent_comment_count, has_threaded_comments)
+
+    js_data = get_json(url, headers)
+    video_url = js_data['data']['shortcode_media']['video_url']
+
+    return video_url
+
+def get_sidecar_urls(shortcode):
+    url = URL_SHORTCODE.format(shortcode)
+
+    browser.get(url)
+
+    urls = set()
+    is_start = True
     while True:
         ele_imgs = browser.find("._97aPb img", waittime=10)
 
         if isinstance(ele_imgs, list):
             for ele_img in ele_imgs:
-                img_urls.add(ele_img.get_attribute("src"))
+                urls.add(ele_img.get_attribute("src"))
         else:
             break
+
+        play_btn = browser.find_one('.B2xwy._3G0Ji.PTIMp.videoSpritePlayButton')
+        if play_btn:
+            urls.add(browser.find_one('.tWeCl')[0]["src"])
+            if is_start:
+                urls.remove(ele_imgs[0].get_attribute("src"))
+                is_start = False
+            else:
+                urls.remove(ele_imgs[1].get_attribute("src"))
 
         next_photo_btn = browser.find_one("._6CZji .coreSpriteRightChevron")
 
@@ -206,165 +227,177 @@ def fetch_imgs(dict_post):
         else:
             break
 
-    dict_post["img_urls"] = list(img_urls)
+    return list(urls)
 
-# def fetch_videos(dict_post):
-    # video_urls = set()
-    # while True:
-    #     ele_videos = browser.find(".QvAa1 ", waittime=10)
+def get_saved_urls(headers):
+    url = 'https://www.instagram.com/{}/?__a=1'.format(logged_in_user)
 
-    #     if ele_videos:
-    #         ele_videos.click()
-    # ele_videos = browser.find(".QvAa1 ", waittime=10)
-    # if ele_videos:
-    #     ele_videos.click()
+    params = {
+        '__a': '1'
+    }
 
-def download_files(url_list, username, filename):
-    if not os.path.exists(SAVE_PATH): 
-        os.makedirs(SAVE_PATH)
+    response = requests.get(url=url,params=params,headers=headers)
+    data = response.text
+    js_data = json.loads(data)
+
+    urls = list()
+
+    user_id = js_data["logging_page_id"][12: ]
+
+    edges = js_data["graphql"]["user"]["edge_saved_media"]["edges"]
+    page_info = js_data["graphql"]["user"]["edge_saved_media"]["page_info"]
+    cursor = page_info['end_cursor']
+    has_next_page = page_info['has_next_page']
+
+    for edge in edges:
+        if edge['node']['__typename'] == 'GraphSidecar':
+            shortcode = edge['node']['shortcode']
+            for url in get_sidecar_urls(shortcode):
+                urls.append(url)
+        else:
+            if edge['node']['is_video']:
+                shortcode = edge['node']['shortcode']
+                video_url = get_video_url(shortcode, headers)
+                urls.append(video_url)
+            else:
+                display_url = edge['node']['display_url']
+                urls.append(display_url)
+    while has_next_page:
+        url = URL_QUERY_POSTS.format(HASH_SAVED_POSTS, user_id, cursor)
+
+        js_data = get_json(url, headers)
+
+        edges = js_data['data']['user']['edge_saved_media']['edges']
+        page_info = js_data['data']['user']['edge_saved_media']['page_info']
+        cursor = page_info['end_cursor']
+        has_next_page = page_info['has_next_page']
+        
+        for edge in edges:
+            if edge['node']['__typename'] == 'GraphSidecar':
+                shortcode = edge['node']['shortcode']
+                for url in get_sidecar_urls(shortcode):
+                    urls.append(url)
+            else:
+                if edge['node']['is_video']:
+                    shortcode = edge['node']['shortcode']
+                    video_url = get_video_url(shortcode, headers)
+                    urls.append(video_url)
+                else:
+                    display_url = edge['node']['display_url']
+                    urls.append(display_url)
+    return urls
+
+def get_urls(html, headers):
+    user_id = re.findall('"profilePage_([0-9]+)"', html, re.S)[0]
+
+    doc = pq(html)
+    items = doc('script[type="text/javascript"]').items()
+
+    urls = list()
+    for item in items:
+        if item.text().strip().startswith('window._sharedData'):
+            js_data = json.loads(item.text()[21: -1], encoding='utf-8')
+
+            edges = js_data["entry_data"]["ProfilePage"][0]["graphql"]["user"]["edge_owner_to_timeline_media"]["edges"]
+            page_info = js_data["entry_data"]["ProfilePage"][0]["graphql"]["user"]["edge_owner_to_timeline_media"]['page_info']
+            cursor = page_info['end_cursor']
+            has_next_page = page_info['has_next_page']
+
+            # Exclude preview image of videos.
+            for edge in edges:
+                if edge['node']['__typename'] == 'GraphSidecar':
+                    shortcode = edge['node']['shortcode']
+                    for url in get_sidecar_urls(shortcode):
+                        urls.append(url)
+                else:
+                    if edge['node']['is_video']:
+                        shortcode = edge['node']['shortcode']
+                        video_url = get_video_url(shortcode, headers)
+                        urls.append(video_url)
+                    else:
+                        display_url = edge['node']['display_url']
+                        urls.append(display_url)
+    while has_next_page:
+        url = URL_QUERY_POSTS.format(HASH_NORMAL_POSTS, user_id, cursor)
+
+        js_data = get_json(url, headers)
+
+        edges = js_data['data']['user']['edge_owner_to_timeline_media']['edges']
+        page_info = js_data['data']['user']['edge_owner_to_timeline_media']['page_info']
+        cursor = page_info['end_cursor']
+        has_next_page = page_info['has_next_page']
+        
+        for edge in edges:
+            if edge['node']['__typename'] == 'GraphSidecar':
+                if edge['node']['__typename'] == 'GraphSidecar':
+                    shortcode = edge['node']['shortcode']
+                    for url in get_sidecar_urls(shortcode):
+                        urls.append(url)
+            else:
+                if edge['node']['is_video']:
+                    shortcode = edge['node']['shortcode']
+                    video_url = get_video_url(shortcode, headers)
+                    urls.append(video_url)
+                else:
+                    display_url = edge['node']['display_url']
+                    urls.append(display_url)
+    return urls
+
+def download_media(urls, headers, save_path):
+    for url in tqdm(urls, desc='Progress'):
+        try:
+            content = get_content(url, headers)
+
+            file_type = 'mp4' if r'mp4?_nc_ht=scontent' in url else 'jpg'
+            file_path = os.path.join(save_path, '{}.{}'.format(md5(content).hexdigest(), file_type))
+            
+            if not os.path.exists(file_path):
+                with open(file_path, 'wb') as file:
+                    file.write(content)
+            else:
+                msg = '{} - Warning: The filename {} exists.\n'.format(
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"), file_path)
+                output_log('\n' + msg, False)
+        except Exception:
+            msg = '{} - Warning: Failed to download this file (url: {}).\n'.format(
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"), url)
+            output_log('\n' + msg, False)
+
+def get_saved_posts(headers):
+    urls = get_saved_urls(headers)
+
+    save_path = os.path.join(SAVE_PATH, logged_in_user + '_saved')
+    if not os.path.exists(save_path): 
+        os.makedirs(save_path)
+
+    download_media(urls, headers, save_path)
+
+def get_posts(username, headers):
+    url = URL + '/{}/'.format(username)
+
+    html = get_html(url, headers)
+    urls = get_urls(html, headers)
 
     save_path = os.path.join(SAVE_PATH, username)
     if not os.path.exists(save_path): 
         os.makedirs(save_path)
 
-    try:
-        index = 1
-        for url in url_list:
-            session = requests.Session()
-            session.mount(url, HTTPAdapter(max_retries=5))
-            downloaded = session.get(url, timeout=(5, 10))
-            file_path = os.path.join(save_path, filename + 
-                '_{}.jpg'.format(str(index)))
-            with open(file_path, 'wb') as file:
-                file.write(downloaded.content)
-            index += 1
-    except Exception as e:
-        msg = '\n{} - Warning: Failed to download this file (url: {}).\n'.format(
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S"), url)
-        output_log(msg)
-        print(msg)
-
-def get_posts(username, post_num):
-    @retry()
-    def check_next_post(cur_key):
-        # May be None.
-        ele_a_datetime = browser.find_one(".eo2As .c-Yi7")
-
-        # It takes time to load the post for some users with slow network.
-        if ele_a_datetime is None:
-            raise RetryException()
-
-        next_key = ele_a_datetime.get_attribute("href")
-        if cur_key == next_key:
-            raise RetryException()
-
-    browser.implicitly_wait(1)
-    browser.scroll_down()
-    # May be None.
-    ele_post = browser.find_one(".v1Nh3 a")
-    if ele_post:
-        ele_post.click()
-
-    dict_posts = {}
-
-    pbar = tqdm(total=post_num)
-    pbar.set_description("Progress")
-    cur_key = None
-
-    # Get all posts.
-    for _ in range(post_num):
-        dict_post = {}
-
-        # Get post details.
-        try:
-            check_next_post(cur_key)
-
-            # Get datetime and url as key. May be None.
-            ele_a_datetime = browser.find_one(".eo2As .c-Yi7")
-            cur_key = ele_a_datetime.get_attribute("href")
-            dict_post["key"] = cur_key
-
-            fetch_datetime(dict_post)
-
-            # # The web crawler explores posts from new to old.
-            # if dict_post["datetime"][: 10] < START_DATE:
-            #     break
-            # if dict_post["datetime"][: 10] > END_DATE:
-            #     print(dict_post["datetime"][: 10])
-            #     continue
-
-            fetch_imgs(dict_post)
-            # fetch_videos(dict_post)
-        except RetryException:
-            msg = '\n{} - Warning: Failed to download this file (key: {}).\n'.format(
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 
-                cur_key or '[URL not fetched]')
-            output_log(msg)
-            print(msg)
-
-            break
-        except Exception:
-            msg = '\n{} - Warning: Failed to download this file (key: {}).\n'.format(
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 
-                cur_key if isinstance(cur_key, str) else '[URL not fetched]')
-            output_log(msg)
-            print(msg)
-
-        filename = dict_post["key"][28: -1]
-        download_files(dict_post["img_urls"], username, filename)
-
-        dict_posts[browser.current_url] = dict_post
-
-        pbar.update(1)
-        left_arrow = browser.find_one(".HBoOv")
-        if left_arrow:
-            left_arrow.click()
-
-def get_saved_posts():
-    url_saved = URL_SAVED.format(logged_in_user)
-
-    browser.get(url_saved)
-
-    url = 'https://www.instagram.com/oscar980719/?__a=1'
-
-    cookies_list = browser.driver.get_cookies()
-    cookies_dict = {}
-    for cookie in cookies_list:
-        cookies_dict[cookie['name']] = cookie['value']
-
-    param = {
-        '__a': '1'
-    }
-
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/77.0.3865.120 Safari/537.36'
-    }
-
-    headers['cookie'] = COOKIE.format(cookies_dict["mid"], cookies_dict["shbid"], 
-        cookies_dict["shbts"], cookies_dict["ds_user_id"], cookies_dict["csrftoken"], 
-        cookies_dict["sessionid"], cookies_dict["rur"], cookies_dict["urlgen"])
-    
-    response = requests.get(url=url,params=param,headers=headers)
-    data = response.text
-    data = json.loads(data)
-
-    post_num = data["graphql"]["user"]["edge_saved_media"]["count"]
-    get_posts(logged_in_user, post_num)
+    download_media(urls, headers, save_path)
 
 def web_crawler():
     global START_DATE
     global END_DATE
     
     if USERNAME == '' or PASSWORD == '':
-        msg = '{} - Error: Please enter your username and password in secret.py (option --saved).\n'.format(
+        msg = '{} - Error: Please enter your username and password in secret.py.\n'.format(
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        output_log('\n' + msg, traceback=False)
+        output_log('\n' + msg, False)
         raise Exception(msg)
 
-    login()
+    headers = login()
 
     if download_saved:
-        get_saved_posts()
+        get_saved_posts(headers)
 
     if download_from_file:
         with open(sys.argv[1], 'r', encoding='utf8') as input_file:
@@ -378,26 +411,20 @@ def web_crawler():
                     END_DATE = x[2]
             username = x[0]
 
-            user_profile = get_user_profile(username)
-
-            print_user_profile(user_profile)
-
-            dismiss_login_prompt()
-
-            post_num = int(user_profile["post_num"].replace(",", ""))
-            print('* Total number of posts: {} (username: {}).\n'.format(post_num, username))
-            get_posts(username, post_num)
+            get_posts(username, headers)
 
 if __name__ == '__main__':
     assert len(sys.argv) == 2 or len(sys.argv) == 3, 'Error: The number of arguments is incorrect.'
-    if len(sys.argv) == 2:
-        if sys.argv[1] == "--saved":
+    if len(sys.argv) == 2 and sys.argv[1] == "--saved":
             download_saved = True
+            download_from_file = False
     if len(sys.argv) == 3:
         if sys.argv[2] == "--saved":
             download_saved = True
-            download_from_file = True
         else:
             print('Error: Unknown argument at position 3.\n')
+
+    if not os.path.exists(SAVE_PATH): 
+        os.makedirs(SAVE_PATH)
 
     web_crawler()
