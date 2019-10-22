@@ -22,6 +22,7 @@ URL = 'https://www.instagram.com'
 URL_SHORTCODE = 'https://www.instagram.com/p/{}/'
 URL_SAVED = 'https://www.instagram.com/{}/saved/'
 URL_QUERY_POSTS = 'https://www.instagram.com/graphql/query/?query_hash={}&variables=%7B%22id%22%3A%22{}%22%2C%22first%22%3A12%2C%22after%22%3A%22{}%22%7D'
+URL_QUERY_SAVED_POSTS = 'https://www.instagram.com/{}/?__a=1'
 URL_QUERY_SAVED_VIDEOS = 'https://www.instagram.com/graphql/query/?query_hash={}&variables=%7B%22shortcode%22%3A%22{}%22%2C%22child_comment_count%22%3A{}%2C%22fetch_comment_count%22%3A{}%2C%22parent_comment_count%22%3A{}%2C%22has_threaded_comments%22%3A{}%7D'
 
 HASH_NORMAL_POSTS = 'f045d723b6f7f8cc299d62b57abd500a'
@@ -29,6 +30,8 @@ HASH_SAVED_POSTS = '8c86fed24fa03a8a2eea2a70a80c7b6b'
 HASH_SAVED_VIDEOS = '870ea3e846839a3b6a8cd9cd7e42290c'
 
 COOKIE = 'mid={}; fbm_124024574287414=base_domain=.instagram.com; shbid={}; shbts={}; ds_user_id={}; csrftoken={}; sessionid={}; rur={}; urlgen={}'
+SHBID = '3317'
+SHBTS = '1571731121.0776558'
 
 START_DATE = '1900-01-01'
 END_DATE = datetime.now().strftime("%Y-%m-%d")
@@ -43,10 +46,16 @@ HAS_SCREEN:
 """
 HAS_SCREEN = False
 browser = Browser(HAS_SCREEN)
+"""
+NEXT_PAGE_WAIT_TIME:
+    Recommended range: 0.3 ~ 1, according to your Internet speed.
+"""
+NEXT_PAGE_WAIT_TIME = 0.5
 
 download_saved = False
 download_from_file = True
 logged_in_user = ''
+username = ''
 
 PATTERN_DATE = r'\d\d\d\d-\d\d-\d\d'
 
@@ -92,8 +101,8 @@ def set_headers():
         'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/77.0.3865.120 Safari/537.36'
     }
 
-    headers['cookie'] = COOKIE.format(cookies_dict["mid"], cookies_dict["shbid"], 
-        cookies_dict["shbts"], cookies_dict["ds_user_id"], cookies_dict["csrftoken"], 
+    headers['cookie'] = COOKIE.format(cookies_dict["mid"], SHBID, 
+        SHBTS, cookies_dict["ds_user_id"], cookies_dict["csrftoken"], 
         cookies_dict["sessionid"], cookies_dict["rur"], cookies_dict["urlgen"])
 
     return headers
@@ -212,25 +221,26 @@ def get_sidecar_urls(shortcode):
 
         play_btn = browser.find_one('.B2xwy._3G0Ji.PTIMp.videoSpritePlayButton')
         if play_btn:
-            urls.add(browser.find_one('.tWeCl')[0]["src"])
+            urls.add(browser.find_one('.tWeCl').get_attribute("src"))
             if is_start:
                 urls.remove(ele_imgs[0].get_attribute("src"))
                 is_start = False
             else:
+                # Exclude the preview image of a video.
                 urls.remove(ele_imgs[1].get_attribute("src"))
 
         next_photo_btn = browser.find_one("._6CZji .coreSpriteRightChevron")
 
         if next_photo_btn:
             next_photo_btn.click()
-            sleep(0.3)
+            sleep(NEXT_PAGE_WAIT_TIME)
         else:
             break
 
     return list(urls)
 
 def get_saved_urls(headers):
-    url = 'https://www.instagram.com/{}/?__a=1'.format(logged_in_user)
+    url = URL_QUERY_SAVED_POSTS.format(logged_in_user)
 
     params = {
         '__a': '1'
@@ -245,9 +255,13 @@ def get_saved_urls(headers):
     user_id = js_data["logging_page_id"][12: ]
 
     edges = js_data["graphql"]["user"]["edge_saved_media"]["edges"]
+    post_count = js_data["graphql"]["user"]["edge_saved_media"]["count"]
     page_info = js_data["graphql"]["user"]["edge_saved_media"]["page_info"]
     cursor = page_info['end_cursor']
     has_next_page = page_info['has_next_page']
+
+    pbar = tqdm(total=post_count)
+    pbar.set_description("Progress")
 
     for edge in edges:
         if edge['node']['__typename'] == 'GraphSidecar':
@@ -262,6 +276,8 @@ def get_saved_urls(headers):
             else:
                 display_url = edge['node']['display_url']
                 urls.append(display_url)
+        pbar.update(1)
+
     while has_next_page:
         url = URL_QUERY_POSTS.format(HASH_SAVED_POSTS, user_id, cursor)
 
@@ -285,6 +301,12 @@ def get_saved_urls(headers):
                 else:
                     display_url = edge['node']['display_url']
                     urls.append(display_url)
+            pbar.update(1)
+
+    msg = '\n{} - Info: Finish exploring saved posts. {} saved posts are found (logged_in_username: {}).\n'.format(
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"), post_count, logged_in_user)
+    print(msg)
+
     return urls
 
 def get_urls(html, headers):
@@ -299,11 +321,14 @@ def get_urls(html, headers):
             js_data = json.loads(item.text()[21: -1], encoding='utf-8')
 
             edges = js_data["entry_data"]["ProfilePage"][0]["graphql"]["user"]["edge_owner_to_timeline_media"]["edges"]
+            post_count = js_data["entry_data"]["ProfilePage"][0]["graphql"]["user"]["edge_owner_to_timeline_media"]["count"]
             page_info = js_data["entry_data"]["ProfilePage"][0]["graphql"]["user"]["edge_owner_to_timeline_media"]['page_info']
             cursor = page_info['end_cursor']
             has_next_page = page_info['has_next_page']
 
-            # Exclude preview image of videos.
+            pbar = tqdm(total=post_count)
+            pbar.set_description("Progress")
+
             for edge in edges:
                 if edge['node']['__typename'] == 'GraphSidecar':
                     shortcode = edge['node']['shortcode']
@@ -317,6 +342,8 @@ def get_urls(html, headers):
                     else:
                         display_url = edge['node']['display_url']
                         urls.append(display_url)
+                pbar.update(1)
+
     while has_next_page:
         url = URL_QUERY_POSTS.format(HASH_NORMAL_POSTS, user_id, cursor)
 
@@ -341,9 +368,20 @@ def get_urls(html, headers):
                 else:
                     display_url = edge['node']['display_url']
                     urls.append(display_url)
+            pbar.update(1)
+
+    msg = '\n{} - Info: Finish exploring posts. {} posts are found (username: {}).\n'.format(
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"), post_count, username)
+    print(msg)
+
     return urls
 
 def download_media(urls, headers, save_path):
+    abs_save_path = os.path.abspath(save_path)
+    msg = '{} - Info: Results are saved in the folder "{}".'.format(
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"), abs_save_path)
+    print(msg)
+
     for url in tqdm(urls, desc='Progress'):
         try:
             content = get_content(url, headers)
@@ -364,6 +402,10 @@ def download_media(urls, headers, save_path):
             output_log('\n' + msg, False)
 
 def get_saved_posts(headers):
+    msg = '{} - Info: Start exploring saved posts (logged_in_username: {}).\n'.format(
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"), logged_in_user)
+    print(msg)
+
     urls = get_saved_urls(headers)
 
     save_path = os.path.join(SAVE_PATH, logged_in_user + '_saved')
@@ -372,7 +414,11 @@ def get_saved_posts(headers):
 
     download_media(urls, headers, save_path)
 
-def get_posts(username, headers):
+def get_posts(headers):
+    msg = '{} - Info: Start exploring posts (username: {}).\n'.format(
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"), username)
+    print(msg)
+
     url = URL + '/{}/'.format(username)
 
     html = get_html(url, headers)
@@ -387,6 +433,7 @@ def get_posts(username, headers):
 def web_crawler():
     global START_DATE
     global END_DATE
+    global username
     
     if USERNAME == '' or PASSWORD == '':
         msg = '{} - Error: Please enter your username and password in secret.py.\n'.format(
@@ -411,7 +458,7 @@ def web_crawler():
                     END_DATE = x[2]
             username = x[0]
 
-            get_posts(username, headers)
+            get_posts(headers)
 
 if __name__ == '__main__':
     assert len(sys.argv) == 2 or len(sys.argv) == 3, 'Error: The number of arguments is incorrect.'
