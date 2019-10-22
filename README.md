@@ -8,6 +8,7 @@ Instagram web crawler. Download images and videos from specific users.
 
 -   2019.10.20 - Add 'Download from saved' function.
 -   2019.10.21 - Reconstruct code and it's able to download videos.
+-   2019.10.22 - Add output of progress during fetching URLs and fix minor bugs.
 
 ## TODO
 
