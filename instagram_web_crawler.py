@@ -17,21 +17,62 @@ from time import sleep
 from tqdm import tqdm
 import traceback
 
+"""
+    Usage:
+        python instagran_web_crawler.py [path] [--saved] 
+    
+    Args:
+        path: Input path (a file including one user_id per line).
+        --saved: Download saved posts.
+
+    Notice:
+        Put chromedriver.exe in folder /bin.
+        Copy secret.py.dist as secret.py in the same folder.
+
+        Input file format:
+            username [start_date] [end_date]
+
+            If end_date is specific and no specific start_date, use '-'. 
+            If start_date is specific and no specific end_date, 
+            no other input is needed.
+            (Default: Posts of all time.)
+
+            options:
+                -f: 
+                    Get following users.
+                -p: 
+                    Download posts (including images and videos).
+
+                (If no -f, it's no need to input options, since -p is default with no option. 
+                The order of options is meaningless.)
+                (Ignore letter case.)
+
+            e.g.
+                a123456789 2019-01-01 2019-06-01 -fp
+                b987654321 2018-01-01 2019-01-01 -Pf
+                c111111111 - 2019-02-01 -F
+                d222222222 2019-03-01 -fp
+                e333333333 
+"""
+
 
 URL = 'https://www.instagram.com'
 URL_SHORTCODE = 'https://www.instagram.com/p/{}/'
 URL_SAVED = 'https://www.instagram.com/{}/saved/'
-URL_QUERY_POSTS = 'https://www.instagram.com/graphql/query/?query_hash={}&variables=%7B%22id%22%3A%22{}%22%2C%22first%22%3A12%2C%22after%22%3A%22{}%22%7D'
+URL_QUERY_POSTS = 'https://www.instagram.com/graphql/query/?query_hash={}&variables=%7B%22id%22%3A%22{}%22%2C%22first%22%3A{}%2C%22after%22%3A%22{}%22%7D'
 URL_QUERY_SAVED_POSTS = 'https://www.instagram.com/{}/?__a=1'
 URL_QUERY_SAVED_VIDEOS = 'https://www.instagram.com/graphql/query/?query_hash={}&variables=%7B%22shortcode%22%3A%22{}%22%2C%22child_comment_count%22%3A{}%2C%22fetch_comment_count%22%3A{}%2C%22parent_comment_count%22%3A{}%2C%22has_threaded_comments%22%3A{}%7D'
+URL_QUERY_FOLLOWING_USERS = 'https://www.instagram.com/graphql/query/?query_hash={}&variables=%7B%22id%22%3A%22{}%22%2C%22include_reel%22%3A{}%2C%22fetch_mutual%22%3A{}%2C%22first%22%3A{}{}%7D'
+FOLLOWING_USERS_SUFFIX = '%2C%22after%22%3A%22{}%3D%3D%22'
 
 HASH_NORMAL_POSTS = 'f045d723b6f7f8cc299d62b57abd500a'
 HASH_SAVED_POSTS = '8c86fed24fa03a8a2eea2a70a80c7b6b'
 HASH_SAVED_VIDEOS = '870ea3e846839a3b6a8cd9cd7e42290c'
+HASH_FOLLOWING_USERS = 'd04b0a864b4b54837c0d870b0e77e076'
+
+FIRST = '12'
 
 COOKIE = 'mid={}; fbm_124024574287414=base_domain=.instagram.com; shbid={}; shbts={}; ds_user_id={}; csrftoken={}; sessionid={}; rur={}; urlgen={}'
-SHBID = '3317'
-SHBTS = '1571731121.0776558'
 
 START_DATE = '1900-01-01'
 END_DATE = datetime.now().strftime("%Y-%m-%d")
@@ -47,17 +88,27 @@ HAS_SCREEN:
 HAS_SCREEN = False
 browser = Browser(HAS_SCREEN)
 """
-NEXT_PAGE_WAIT_TIME:
-    Recommended range: 0.3 ~ 1, according to your Internet speed.
+WAIT_TIME:
+    Recommended value: 0.3 ~ 1, according to your Internet speed.
 """
-NEXT_PAGE_WAIT_TIME = 0.5
+WAIT_TIME = 0.5
 
 download_saved = False
 download_from_file = True
-logged_in_user = ''
-username = ''
+download_posts = True
+get_following = False
 
+logged_in_username = ''
+logged_in_user_id = ''
+
+username = ''
+user_id = ''
+
+PATTERN_OPTION = r'-([pf])([pf]?$)'
 PATTERN_DATE = r'\d\d\d\d-\d\d-\d\d'
+
+MAX_GET_JSON_COUNT = 10
+get_json_count = 0
 
 # TODO: Download media which are in the specified period.
 
@@ -91,7 +142,21 @@ def retry(attempt=10, wait=0.3):
 
     return wrap
 
+def log_out():
+    url = URL + '/{}/'.foramt(logged_in_username)
+
+    browser.get(url)
+    option_btn = browser.find_one('.dCJp8.afkep')
+    option_btn.click()
+    log_out_btn = browser.find('.aOOlW.HoLwm', waittime=10)[7]
+    log_out_btn.click()
+
 def set_headers():
+    global logged_in_user_id
+
+    shbid = '3317'
+    shbts = '1571731121.0776558'
+
     cookies_list = browser.driver.get_cookies()
     cookies_dict = {}
     for cookie in cookies_list:
@@ -101,9 +166,11 @@ def set_headers():
         'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/77.0.3865.120 Safari/537.36'
     }
 
-    headers['cookie'] = COOKIE.format(cookies_dict["mid"], SHBID, 
-        SHBTS, cookies_dict["ds_user_id"], cookies_dict["csrftoken"], 
+    headers['cookie'] = COOKIE.format(cookies_dict["mid"], shbid, 
+        shbts, cookies_dict["ds_user_id"], cookies_dict["csrftoken"], 
         cookies_dict["sessionid"], cookies_dict["rur"], cookies_dict["urlgen"])
+
+    logged_in_user_id = cookies_dict["ds_user_id"]
 
     return headers
 
@@ -126,12 +193,12 @@ def login():
 
     check_login()
 
-    global logged_in_user
+    global logged_in_username
     logged_in_user_url = browser.find(
         "div[class='XrOey'] a")[2].get_attribute("href")
-    logged_in_user = logged_in_user_url[
+    logged_in_username = logged_in_user_url[
         logged_in_user_url[: -1].rfind('/') + 1: -1]
-    print('\n* Logged in as user (username: {}).\n'.format(logged_in_user))
+    print('\n* Logged in as user (username: {}).\n'.format(logged_in_username))
 
     headers = set_headers()
 
@@ -153,8 +220,9 @@ def get_html(url, headers):
         output_log('\n' + msg)
         raise Exception(msg)
 
-@retry()
 def get_json(url, headers):
+    global get_json_count
+
     try:
         response = requests.get(url, headers=headers)
         if response.status_code == requests.codes['ok']:
@@ -163,15 +231,23 @@ def get_json(url, headers):
             msg = '{} - Warning: Failed to get json file (status_code: {}).\n'.format(
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"), response.status_code)
             output_log('\n' + msg, False)
-            print('\n{} - Warning: Retry to get json file.\n'.format(
+            print('{} - 1 Warning: Retry to get json file.\n'.format(
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+            sleep(WAIT_TIME)
+            get_json_count += 1
+            if get_json_count == MAX_GET_JSON_COUNT:
+                raise RetryException()
             return get_json(url, headers)
     except Exception as e:
         msg = '{} - Warning: Failed to get json file (status_code: {}).\n'.format(
             datetime.now().strftime("%Y-%m-%d %H:%M:%S"), response.status_code)
         output_log('\n' + msg, False)
-        print('\n{} - Warning: Retry to get json file.\n'.format(
+        print('{} - 2 Warning: Retry to get json file.\n'.format(
             datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        sleep(WAIT_TIME)
+        get_json_count += 1
+        if get_json_count == MAX_GET_JSON_COUNT:
+            raise RetryException()
         return get_json(url, headers)
  
 def get_content(url, headers):
@@ -233,22 +309,69 @@ def get_sidecar_urls(shortcode):
 
         if next_photo_btn:
             next_photo_btn.click()
-            sleep(NEXT_PAGE_WAIT_TIME)
+            sleep(WAIT_TIME)
         else:
             break
 
     return list(urls)
 
+def get_following_username_list(user_id, headers):
+    include_reel = 'true'
+    fetch_mutual = 'false'
+    first_first = '24'
+
+    url = URL_QUERY_FOLLOWING_USERS.format(HASH_FOLLOWING_USERS, 
+        user_id, include_reel, fetch_mutual, first_first, '')
+
+    js_data = get_json(url, headers)
+
+    edges = js_data['data']['user']['edge_follow']['edges']
+    following_count = js_data['data']['user']['edge_follow']['count']
+    page_info = js_data['data']['user']['edge_follow']['page_info']
+    if page_info['end_cursor']:
+        cursor = page_info['end_cursor'][: -2]
+    else:
+        cursor = None
+    has_next_page = page_info['has_next_page']
+
+    username_list = list()
+
+    pbar = tqdm(total=following_count)
+    pbar.set_description("Progress")
+
+    for edge in edges:
+        username_list.append(edge['node']['username'])
+        pbar.update(1)
+
+    while has_next_page:
+        url = URL_QUERY_FOLLOWING_USERS.format(HASH_FOLLOWING_USERS, 
+            user_id, include_reel, fetch_mutual, FIRST, 
+            FOLLOWING_USERS_SUFFIX.format(cursor))
+
+        js_data = get_json(url, headers)
+
+        edges = js_data['data']['user']['edge_follow']['edges']
+        page_info = js_data['data']['user']['edge_follow']['page_info']
+        if page_info['end_cursor']:
+            cursor = page_info['end_cursor'][: -2]
+        else:
+            cursor = None
+        has_next_page = page_info['has_next_page']
+
+        for edge in edges:
+            username_list.append(edge['node']['username'])
+            pbar.update(1)
+
+    msg = '\n\n{} - Info: Finish exploring following users. {} following users are found (username: {}).\n'.format(
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"), following_count, username)
+    print(msg)
+
+    return username_list
+
 def get_saved_urls(headers):
-    url = URL_QUERY_SAVED_POSTS.format(logged_in_user)
+    url = URL_QUERY_SAVED_POSTS.format(logged_in_username)
 
-    params = {
-        '__a': '1'
-    }
-
-    response = requests.get(url=url,params=params,headers=headers)
-    data = response.text
-    js_data = json.loads(data)
+    js_data = get_json(url, headers)
 
     urls = list()
 
@@ -279,7 +402,7 @@ def get_saved_urls(headers):
         pbar.update(1)
 
     while has_next_page:
-        url = URL_QUERY_POSTS.format(HASH_SAVED_POSTS, user_id, cursor)
+        url = URL_QUERY_POSTS.format(HASH_SAVED_POSTS, user_id, FIRST, cursor)
 
         js_data = get_json(url, headers)
 
@@ -304,12 +427,13 @@ def get_saved_urls(headers):
             pbar.update(1)
 
     msg = '\n{} - Info: Finish exploring saved posts. {} saved posts are found (logged_in_username: {}).\n'.format(
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S"), post_count, logged_in_user)
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"), post_count, logged_in_username)
     print(msg)
 
     return urls
 
 def get_urls(html, headers):
+    global user_id
     user_id = re.findall('"profilePage_([0-9]+)"', html, re.S)[0]
 
     doc = pq(html)
@@ -345,7 +469,7 @@ def get_urls(html, headers):
                 pbar.update(1)
 
     while has_next_page:
-        url = URL_QUERY_POSTS.format(HASH_NORMAL_POSTS, user_id, cursor)
+        url = URL_QUERY_POSTS.format(HASH_NORMAL_POSTS, user_id, FIRST, cursor)
 
         js_data = get_json(url, headers)
 
@@ -401,14 +525,43 @@ def download_media(urls, headers, save_path):
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"), url)
             output_log('\n' + msg, False)
 
+def get_following_users(headers, is_logged_in_user=False):
+    msg = '{} - Info: Start exploring following users (username: {}).\n'.format(
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"), username)
+    print(msg)
+
+    if is_logged_in_user:
+        get_user_id = logged_in_user_id
+    elif download_posts:
+        get_user_id = user_id
+    else:
+        url = URL + '/{}/'.format(username)
+        html = get_html(url, headers)
+        get_user_id = re.findall('"profilePage_([0-9]+)"', html, re.S)[0]
+
+    username_list = get_following_username_list(get_user_id, headers)
+
+    save_path = os.path.join(SAVE_PATH, username)
+    if not os.path.exists(save_path): 
+        os.makedirs(save_path)
+
+    filepath = os.path.join(save_path, 'following_users.txt')
+    msg = '\n{} - Info: Following username list is saved in the file "{}".'.format(
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"), filepath)
+    print(msg)
+
+    with open(filepath, 'w', encoding='utf8') as output_file:
+        for user in username_list:
+            output_file.write(user + '\n')
+
 def get_saved_posts(headers):
     msg = '{} - Info: Start exploring saved posts (logged_in_username: {}).\n'.format(
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S"), logged_in_user)
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"), logged_in_username)
     print(msg)
 
     urls = get_saved_urls(headers)
 
-    save_path = os.path.join(SAVE_PATH, logged_in_user + '_saved')
+    save_path = os.path.join(SAVE_PATH, logged_in_username + '_saved')
     if not os.path.exists(save_path): 
         os.makedirs(save_path)
 
@@ -430,11 +583,84 @@ def get_posts(headers):
 
     download_media(urls, headers, save_path)
 
-def web_crawler():
+def set_options(match):
+    global get_following
+    global download_posts
+
+    options = [match.group(1).lower(), match.group(2).lower()]
+    if 'f' in options :
+        get_following = True
+
+        if 'p' not in options:
+            download_posts = False
+    
+def parse_argv(argv):
+    """
+        Args     Argv
+        1        username 
+
+        2        username options
+        2        username start_date
+
+        3        username start_date options
+        3        username start_date end_date
+        3        username - end_date
+
+        4        username start_date end_date options
+        4        username - end_date options
+    """
+
     global START_DATE
     global END_DATE
     global username
-    
+
+    # Ignore letter case.
+    pattern_option = re.compile(PATTERN_OPTION, re.I)
+    pattern_date = re.compile(PATTERN_DATE)
+
+    if len(argv) == 1:
+        pass
+    elif len(argv) == 2:
+        match = pattern_option.match(argv[1])
+        if match:
+            set_options(match)
+        elif pattern_date.match(argv[1]):
+            START_DATE = argv[1]
+        else:
+            msg = 'Error: Unknown arguments from input file (args: 2).\n'
+            raise AssertionError(msg)
+    elif len(argv) == 3:
+        match = pattern_option.match(argv[2])
+        if argv[1] == '-' and pattern_date.match(argv[2]):
+            END_DATE = argv[2]
+        elif pattern_date.match(argv[1]) and match:
+            set_options(match)
+            START_DATE = argv[1]
+        elif pattern_date.match(argv[1]) and pattern_date.match(argv[2]):
+            START_DATE = argv[1]
+            END_DATE = argv[2]
+        else:
+            msg = 'Error: Unknown arguments from input file (args: 3).\n'
+            raise AssertionError(msg)
+    elif len(argv) == 4:
+        match = pattern_option.match(argv[3])
+        if argv[1] == '-' and pattern_date.match(argv[2]) and match:
+                set_options(match)
+                END_DATE = argv[2]
+        elif pattern_date.match(argv[1]) and pattern_date.match(argv[2]) and match:
+                set_options(match)
+                START_DATE = argv[1]
+                END_DATE = argv[2]
+        else:
+            msg = 'Error: Unknown arguments from input file (args: 4).\n'
+            raise AssertionError(msg)
+    else:
+        msg = 'Error: Unknown arguments from input file (args: {}).\n'.format(len(argv))
+        raise AssertionError(msg)
+
+    username = argv[0]
+
+def web_crawler():
     if USERNAME == '' or PASSWORD == '':
         msg = '{} - Error: Please enter your username and password in secret.py.\n'.format(
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
@@ -450,18 +676,19 @@ def web_crawler():
         with open(sys.argv[1], 'r', encoding='utf8') as input_file:
             username_list = [line.split() for line in input_file if len(line.split()) != 0]
 
-        for x in username_list:
-            if len(x) != 1:
-                if re.match(PATTERN_DATE, x[1]):
-                    START_DATE = x[1]
-                if len(x) == 3 and re.match(PATTERN_DATE, x[2]):
-                    END_DATE = x[2]
-            username = x[0]
+        for argv in username_list:
+            parse_argv(argv)
 
-            get_posts(headers)
+            if download_posts:
+                get_posts(headers)
+
+            if get_following:
+                get_following_users(headers, user_id == logged_in_user_id)
+
 
 if __name__ == '__main__':
     assert len(sys.argv) == 2 or len(sys.argv) == 3, 'Error: The number of arguments is incorrect.'
+
     if len(sys.argv) == 2 and sys.argv[1] == "--saved":
             download_saved = True
             download_from_file = False
@@ -469,7 +696,7 @@ if __name__ == '__main__':
         if sys.argv[2] == "--saved":
             download_saved = True
         else:
-            print('Error: Unknown argument at position 3.\n')
+            raise AssertionError('Error: Unknown argument at position 3.\n')
 
     if not os.path.exists(SAVE_PATH): 
         os.makedirs(SAVE_PATH)
