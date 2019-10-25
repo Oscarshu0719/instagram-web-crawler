@@ -8,6 +8,7 @@ Instagram web crawler.
 
 -   Download images and videos from specific users. 
 -   Get following user names of logged in user.
+-   Transfer following users from one account to another.
 
 ## Change log
 
