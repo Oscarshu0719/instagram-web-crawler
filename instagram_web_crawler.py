@@ -2,7 +2,7 @@
 
 from src.browser import Browser
 from src.exceptions import RetryException
-from src.secret import USERNAME, PASSWORD
+from src.secret import USERNAME, PASSWORD, TRANS_USERNAME, TRANS_PASSWORD
 
 from datetime import datetime
 from functools import wraps, partial
@@ -19,11 +19,14 @@ import traceback
 
 """
     Usage:
-        python instagran_web_crawler.py [path] [--saved] 
+        python instagran_web_crawler.py [path] [options] 
     
     Args:
         path: Input path (a file including one user_id per line).
-        --saved: Download saved posts.
+
+        options:
+            --saved: Download saved posts.
+            --transfer: Transfer following users from USERNAME to TRANS_USERNAME.
 
     Notice:
         Put chromedriver.exe in folder /bin.
@@ -97,9 +100,11 @@ download_saved = False
 download_from_file = True
 download_posts = True
 get_following = False
+transfer_following = False
 
 logged_in_username = ''
 logged_in_user_id = ''
+trasnfer_from_username = ''
 
 username = ''
 user_id = ''
@@ -113,8 +118,8 @@ get_json_count = 0
 # TODO: Download media which are in the specified period.
 
 def output_log(msg, traceback_option=True):
-    with open(LOG_PATH, 'a', encoding='utf8') as output_log:
-        output_log.write(msg)
+    with open(LOG_PATH, 'a', encoding='utf8') as output_file:
+        output_file.write(msg)
     if traceback_option:
         traceback.print_exc(file=open(LOG_PATH, 'a', encoding='utf8'))
 
@@ -129,13 +134,18 @@ def retry(attempt=10, wait=0.3):
                     sleep(wait)
                     return retry(attempt - 1, wait)(func)(*args, **kwargs)
                 else:
-                    msg = '{} - Error: Failed to login (username: {}, password: {}).\n'.format(
-                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"), USERNAME, PASSWORD)
+                    if func.__name__ == 'check_login':
+                        tmp = 'log in. (username: {}, password: {})'.format(USERNAME, PASSWORD)
+                    elif func.__name__ == 'check_log_out':
+                        tmp = 'log out.'
+
+                    msg = '{} - Error: Failed to {}\n'.format(
+                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"), tmp)
+                    output_log('\n' + msg, True)
+
                     exc = RetryException(msg)
-
-                    output_log('\n' + msg)
-
                     exc.__cause__ = None
+
                     raise exc
 
         return wrapped_f
@@ -143,13 +153,20 @@ def retry(attempt=10, wait=0.3):
     return wrap
 
 def log_out():
-    url = URL + '/{}/'.foramt(logged_in_username)
+    url = URL + '/{}/'.format(logged_in_username)
 
     browser.get(url)
     option_btn = browser.find_one('.dCJp8.afkep')
     option_btn.click()
     log_out_btn = browser.find('.aOOlW.HoLwm', waittime=10)[7]
     log_out_btn.click()
+
+    @retry()
+    def check_log_out():
+        if not browser.find('._9nyy2'):
+            raise RetryException()
+
+    check_log_out()
 
 def set_headers():
     global logged_in_user_id
@@ -174,14 +191,26 @@ def set_headers():
 
     return headers
 
-def login():
-    url = "%s/accounts/login/" % (URL)
+def login(trans_login=False):
+    global logged_in_username
+
+    url = "{}/accounts/login/".format(URL)
     
     browser.get(url)
+
+    if trans_login:
+        username = TRANS_USERNAME
+        password = TRANS_PASSWORD
+        global trasnfer_from_username
+        trasnfer_from_username = logged_in_username
+    else:
+        username = USERNAME
+        password = PASSWORD
+
     u_input = browser.find_one('input[name="username"]')
-    u_input.send_keys(USERNAME)
+    u_input.send_keys(username)
     p_input = browser.find_one('input[name="password"]')
-    p_input.send_keys(PASSWORD)
+    p_input.send_keys(password)
 
     login_btn = browser.find_one(".L3NKy")
     login_btn.click()
@@ -193,12 +222,11 @@ def login():
 
     check_login()
 
-    global logged_in_username
     logged_in_user_url = browser.find(
         "div[class='XrOey'] a")[2].get_attribute("href")
     logged_in_username = logged_in_user_url[
         logged_in_user_url[: -1].rfind('/') + 1: -1]
-    print('\n* Logged in as user (username: {}).\n'.format(logged_in_username))
+    print('\n* Logged in as {}.\n'.format(logged_in_username))
 
     headers = set_headers()
 
@@ -212,12 +240,12 @@ def get_html(url, headers):
         else:
             msg = '{} - Error: Failed to get page source (status_code: {}).\n'.format(
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"), response.status_code)
-            output_log('\n' + msg)
+            output_log('\n' + msg, True)
             raise Exception(msg)
     except Exception:
         msg = '{} - Error: Failed to get page source (status_code: {}).\n'.format(
             datetime.now().strftime("%Y-%m-%d %H:%M:%S"), response.status_code)
-        output_log('\n' + msg)
+        output_log('\n' + msg, True)
         raise Exception(msg)
 
 def get_json(url, headers):
@@ -256,13 +284,13 @@ def get_content(url, headers):
         if response.status_code == requests.codes['ok']:
             return response.content
         else:
-            msg = '{} - Error: Failed to get image content (status_code: {}).\n'.format(
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"), response.status_code)
-            output_log('\n' + msg, False)
+            msg = '{} - Error: Failed to get image content (status_code: {}, url: {}).\n'.format(
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"), response.status_code, url)
+            output_log('\n' + msg, True)
     except Exception as e:
-        msg = '{} - Error: Failed to get image content (status_code: {}).\n'.format(
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S"), response.status_code)
-        output_log('\n' + msg, False)
+        msg = '{} - Error: Failed to get image content (status_code: {}, url: {}).\n'.format(
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"), response.status_code, url)
+        output_log('\n' + msg, True)
 
 def get_video_url(shortcode, headers):
     child_comment_count = '3'
@@ -315,7 +343,39 @@ def get_sidecar_urls(shortcode):
 
     return list(urls)
 
-def get_following_username_list(user_id, headers):
+def transfer_following_users(username_list):
+    button_not_follow_class = '_5f5mN       jIbKX  _6VtSN     yZn4P   '
+
+    @retry()
+    def check_follow():
+        follow_btn = browser.find_one('button')
+        if follow_btn.get_attribute("class") == button_not_follow_class:
+            raise RetryException()
+
+    has_followed = 0
+    for username in tqdm(username_list, desc='Progress'):
+        url = '{}/{}/'.format(URL, username)
+
+        browser.get(url)
+
+        follow_btn = browser.find_one('button')
+
+        if follow_btn.get_attribute("class") == button_not_follow_class:
+            follow_btn.click()
+            check_follow()
+        else:
+            has_followed += 1
+            msg = '{} - Info: This account has followed this user (username: {}).\n'.format(
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"), username)
+            print(msg)
+            output_log('\n' + msg, False)
+
+    msg = '\n{} - Info: Finish following users. (Successful: {}, Already followed: {}, from_username: {}, to_username: {}).\n'.format(
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"), len(username_list) - has_followed, has_followed, 
+        trasnfer_from_username, logged_in_username)
+    print(msg)
+
+def get_following_username_list(user_id, username, headers):
     include_reel = 'true'
     fetch_mutual = 'false'
     first_first = '24'
@@ -426,7 +486,7 @@ def get_saved_urls(headers):
                     urls.append(display_url)
             pbar.update(1)
 
-    msg = '\n{} - Info: Finish exploring saved posts. {} saved posts are found (logged_in_username: {}).\n'.format(
+    msg = '\n\n{} - Info: Finish exploring saved posts. {} saved posts are found (logged_in_username: {}).\n'.format(
         datetime.now().strftime("%Y-%m-%d %H:%M:%S"), post_count, logged_in_username)
     print(msg)
 
@@ -494,7 +554,7 @@ def get_urls(html, headers):
                     urls.append(display_url)
             pbar.update(1)
 
-    msg = '\n{} - Info: Finish exploring posts. {} posts are found (username: {}).\n'.format(
+    msg = '\n\n{} - Info: Finish exploring posts. {} posts are found (username: {}).\n'.format(
         datetime.now().strftime("%Y-%m-%d %H:%M:%S"), post_count, username)
     print(msg)
 
@@ -519,40 +579,43 @@ def download_media(urls, headers, save_path):
             else:
                 msg = '{} - Warning: The filename {} exists.\n'.format(
                     datetime.now().strftime("%Y-%m-%d %H:%M:%S"), file_path)
-                output_log('\n' + msg, False)
+                output_log('\n' + msg, True)
         except Exception:
             msg = '{} - Warning: Failed to download this file (url: {}).\n'.format(
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"), url)
-            output_log('\n' + msg, False)
+            output_log('\n' + msg, True)
 
-def get_following_users(headers, is_logged_in_user=False):
+def transfer_following_to_another_account(headers):
     msg = '{} - Info: Start exploring following users (username: {}).\n'.format(
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S"), username)
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"), logged_in_username)
     print(msg)
 
-    if is_logged_in_user:
-        get_user_id = logged_in_user_id
-    elif download_posts:
-        get_user_id = user_id
-    else:
-        url = URL + '/{}/'.format(username)
-        html = get_html(url, headers)
-        get_user_id = re.findall('"profilePage_([0-9]+)"', html, re.S)[0]
+    username_list = get_following_username_list(logged_in_user_id, logged_in_username, headers)
 
-    username_list = get_following_username_list(get_user_id, headers)
-
-    save_path = os.path.join(SAVE_PATH, username)
+    save_path = os.path.join(SAVE_PATH, logged_in_username)
     if not os.path.exists(save_path): 
         os.makedirs(save_path)
 
     filepath = os.path.join(save_path, 'following_users.txt')
+    abs_file_path = os.path.abspath(filepath)
     msg = '\n{} - Info: Following username list is saved in the file "{}".'.format(
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S"), filepath)
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"), abs_file_path)
     print(msg)
 
     with open(filepath, 'w', encoding='utf8') as output_file:
         for user in username_list:
             output_file.write(user + '\n')
+
+    log_out()
+
+    # Login again.
+    headers = login(trans_login=True)
+
+    msg = '{} - Info: Start following users. (from_username: {}, to_username: {}).\n'.format(
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"), trasnfer_from_username, logged_in_username)
+    print(msg)
+
+    transfer_following_users(username_list)
 
 def get_saved_posts(headers):
     msg = '{} - Info: Start exploring saved posts (logged_in_username: {}).\n'.format(
@@ -561,7 +624,11 @@ def get_saved_posts(headers):
 
     urls = get_saved_urls(headers)
 
-    save_path = os.path.join(SAVE_PATH, logged_in_username + '_saved')
+    save_path = os.path.join(SAVE_PATH, logged_in_username)
+    if not os.path.exists(save_path): 
+        os.makedirs(save_path)
+    
+    save_path = os.path.join(save_path, 'saved')
     if not os.path.exists(save_path): 
         os.makedirs(save_path)
 
@@ -572,12 +639,16 @@ def get_posts(headers):
         datetime.now().strftime("%Y-%m-%d %H:%M:%S"), username)
     print(msg)
 
-    url = URL + '/{}/'.format(username)
+    url = '{}/{}/'.format(URL, username)
 
     html = get_html(url, headers)
     urls = get_urls(html, headers)
 
     save_path = os.path.join(SAVE_PATH, username)
+    if not os.path.exists(save_path): 
+        os.makedirs(save_path)
+
+    save_path = os.path.join(save_path, 'posts')
     if not os.path.exists(save_path): 
         os.makedirs(save_path)
 
@@ -594,7 +665,7 @@ def set_options(match):
         if 'p' not in options:
             download_posts = False
     
-def parse_argv(argv):
+def parse_options(argv):
     """
         Args     Argv
         1        username 
@@ -660,7 +731,7 @@ def parse_argv(argv):
 
     username = argv[0]
 
-def web_crawler():
+def web_crawler(file_path):
     if USERNAME == '' or PASSWORD == '':
         msg = '{} - Error: Please enter your username and password in secret.py.\n'.format(
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
@@ -669,36 +740,94 @@ def web_crawler():
 
     headers = login()
 
+    if not os.path.exists(SAVE_PATH): 
+        os.makedirs(SAVE_PATH)
+
     if download_saved:
         get_saved_posts(headers)
 
     if download_from_file:
-        with open(sys.argv[1], 'r', encoding='utf8') as input_file:
+        with open(file_path, 'r', encoding='utf8') as input_file:
             username_list = [line.split() for line in input_file if len(line.split()) != 0]
 
         for argv in username_list:
-            parse_argv(argv)
+            parse_options(argv)
 
             if download_posts:
                 get_posts(headers)
 
             if get_following:
-                get_following_users(headers, user_id == logged_in_user_id)
+                if download_posts:
+                    get_user_id = user_id
+                else:
+                    url = '{}/{}/'.format(URL, username)
+                    html = get_html(url, headers)
+                    get_user_id = re.findall('"profilePage_([0-9]+)"', html, re.S)[0]
+
+                username_list = get_following_username_list(get_user_id, username, headers)
+
+                save_path = os.path.join(SAVE_PATH, username)
+                if not os.path.exists(save_path): 
+                    os.makedirs(save_path)
+
+                filepath = os.path.join(save_path, 'following_users.txt')
+                abs_file_path = os.path.abspath(filepath)
+                msg = '\n{} - Info: Following username list is saved in the file "{}".'.format(
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"), abs_file_path)
+                print(msg)
+
+                with open(filepath, 'w', encoding='utf8') as output_file:
+                    for user in username_list:
+                        output_file.write(user + '\n')
+    
+    if transfer_following:
+        transfer_following_to_another_account(headers)
 
 
 if __name__ == '__main__':
-    assert len(sys.argv) == 2 or len(sys.argv) == 3, 'Error: The number of arguments is incorrect.'
+    """ (First argument is omitted.)
+    Args     Argv
+    1        input_file
+    1        --saved
+    1        --transfer
 
-    if len(sys.argv) == 2 and sys.argv[1] == "--saved":
-            download_saved = True
-            download_from_file = False
-    if len(sys.argv) == 3:
-        if sys.argv[2] == "--saved":
-            download_saved = True
+    2        input_file --saved
+    2        input_file --transfer
+    2        --saved --transfer
+
+    3        input_file --saved --transfer
+    """
+
+    assert 2 <= len(sys.argv) <= 4, 'Error: The number of arguments is incorrect.'
+
+    file_path = ''
+
+    sys.argv.remove(sys.argv[0])
+    args = len(sys.argv)
+
+    if "--saved" in sys.argv:
+        download_saved = True
+        sys.argv.remove("--saved")
+    if "--transfer" in sys.argv:
+        transfer_following = True
+        sys.argv.remove("--transfer") 
+
+    if args == 1:
+        if len(sys.argv) == 1:
+            file_path = sys.argv[0]
         else:
-            raise AssertionError('Error: Unknown argument at position 3.\n')
+            download_from_file = False
+    elif args == 2:
+        if len(sys.argv) == 0:
+            download_from_file = False
+        elif len(sys.argv) == 1:
+            file_path = sys.argv[0]
+        else:
+            raise AssertionError('Error: Unknown arguments ({}).\n'.format(str(sys.argv)))
+    elif args == 3:
+        if len(sys.argv) == 1:
+            file_path = sys.argv[0]
+        else:
+            raise AssertionError('Error: Unknown arguments ({}).\n'.format(str(sys.argv)))
 
-    if not os.path.exists(SAVE_PATH): 
-        os.makedirs(SAVE_PATH)
-
-    web_crawler()
+    web_crawler(file_path)
