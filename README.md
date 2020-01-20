@@ -17,6 +17,7 @@ Instagram web crawler.
 -   2019.10.22 - Add output of progress during fetching URLs and fix minor bugs. 
 -   2019.10.23 - Add 'Get following users' function.
 -   2019.10.25 - Add 'Transfer following users to another account' function.
+-   2020.01.20 - Move constants to `src/constants.py`.
 
 ## TODO
 
