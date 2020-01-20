@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 from src.browser import Browser
+from src.constants import *
 from src.exceptions import RetryException
 from src.secret import USERNAME, PASSWORD, TRANS_USERNAME, TRANS_PASSWORD
 
@@ -59,42 +60,11 @@ import traceback
 """
 
 
-URL = 'https://www.instagram.com'
-URL_SHORTCODE = 'https://www.instagram.com/p/{}/'
-URL_SAVED = 'https://www.instagram.com/{}/saved/'
-URL_QUERY_POSTS = 'https://www.instagram.com/graphql/query/?query_hash={}&variables=%7B%22id%22%3A%22{}%22%2C%22first%22%3A{}%2C%22after%22%3A%22{}%22%7D'
-URL_QUERY_SAVED_POSTS = 'https://www.instagram.com/{}/?__a=1'
-URL_QUERY_SAVED_VIDEOS = 'https://www.instagram.com/graphql/query/?query_hash={}&variables=%7B%22shortcode%22%3A%22{}%22%2C%22child_comment_count%22%3A{}%2C%22fetch_comment_count%22%3A{}%2C%22parent_comment_count%22%3A{}%2C%22has_threaded_comments%22%3A{}%7D'
-URL_QUERY_FOLLOWING_USERS = 'https://www.instagram.com/graphql/query/?query_hash={}&variables=%7B%22id%22%3A%22{}%22%2C%22include_reel%22%3A{}%2C%22fetch_mutual%22%3A{}%2C%22first%22%3A{}{}%7D'
-FOLLOWING_USERS_SUFFIX = '%2C%22after%22%3A%22{}%3D%3D%22'
-
-HASH_NORMAL_POSTS = 'f045d723b6f7f8cc299d62b57abd500a'
-HASH_SAVED_POSTS = '8c86fed24fa03a8a2eea2a70a80c7b6b'
-HASH_SAVED_VIDEOS = '870ea3e846839a3b6a8cd9cd7e42290c'
-HASH_FOLLOWING_USERS = 'd04b0a864b4b54837c0d870b0e77e076'
-
-FIRST = '12'
-
-COOKIE = 'mid={}; fbm_124024574287414=base_domain=.instagram.com; shbid={}; shbts={}; ds_user_id={}; csrftoken={}; sessionid={}; rur={}; urlgen={}'
-
-START_DATE = '1900-01-01'
-END_DATE = datetime.now().strftime("%Y-%m-%d")
+end_date = datetime.now().strftime("%Y-%m-%d")
 
 SAVE_PATH = os.path.join('.', 'results')
-LOG_PATH = 'output.log'
 
-"""
-HAS_SCREEN:
-    True: Open browser window.
-    False: Close browser window.
-"""
-HAS_SCREEN = False
 browser = Browser(HAS_SCREEN)
-"""
-WAIT_TIME:
-    Recommended value: 0.3 ~ 1, according to your Internet speed.
-"""
-WAIT_TIME = 0.5
 
 download_saved = False
 download_from_file = True
@@ -109,10 +79,6 @@ trasnfer_from_username = ''
 username = ''
 user_id = ''
 
-PATTERN_OPTION = r'-([pf])([pf]?$)'
-PATTERN_DATE = r'\d\d\d\d-\d\d-\d\d'
-
-MAX_GET_JSON_COUNT = 10
 get_json_count = 0
 
 # TODO: Download media which are in the specified period.
@@ -682,7 +648,7 @@ def parse_options(argv):
     """
 
     global START_DATE
-    global END_DATE
+    global end_date
     global username
 
     # Ignore letter case.
@@ -703,13 +669,13 @@ def parse_options(argv):
     elif len(argv) == 3:
         match = pattern_option.match(argv[2])
         if argv[1] == '-' and pattern_date.match(argv[2]):
-            END_DATE = argv[2]
+            end_date = argv[2]
         elif pattern_date.match(argv[1]) and match:
             set_options(match)
             START_DATE = argv[1]
         elif pattern_date.match(argv[1]) and pattern_date.match(argv[2]):
             START_DATE = argv[1]
-            END_DATE = argv[2]
+            end_date = argv[2]
         else:
             msg = 'Error: Unknown arguments from input file (args: 3).\n'
             raise AssertionError(msg)
@@ -717,11 +683,11 @@ def parse_options(argv):
         match = pattern_option.match(argv[3])
         if argv[1] == '-' and pattern_date.match(argv[2]) and match:
                 set_options(match)
-                END_DATE = argv[2]
+                end_date = argv[2]
         elif pattern_date.match(argv[1]) and pattern_date.match(argv[2]) and match:
                 set_options(match)
                 START_DATE = argv[1]
-                END_DATE = argv[2]
+                end_date = argv[2]
         else:
             msg = 'Error: Unknown arguments from input file (args: 4).\n'
             raise AssertionError(msg)
